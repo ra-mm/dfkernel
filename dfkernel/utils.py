@@ -11,15 +11,18 @@ import itertools
 import re
 
 class DataflowRef:
-    __slots__ = ['start_pos','end_pos','name','cell_id','cell_tag','ref_qualifier']
+    __slots__ = ['start_pos','end_pos','name','cell_id','cell_tag','ref_qualifier', 'ref_links', 'reversion_links', 'retain_ids']
 
-    def __init__(self, start_pos=None, end_pos=None, name=None, cell_id=None, cell_tag=None, ref_qualifier=None):
+    def __init__(self, start_pos=None, end_pos=None, name=None, cell_id=None, cell_tag=None, ref_qualifier=None, ref_links=None, reversion_links = None, retain_ids=None):
         self.start_pos = start_pos
         self.end_pos = end_pos
         self.name = name
         self.cell_id = cell_id
         self.cell_tag = cell_tag
         self.ref_qualifier = ref_qualifier
+        self.ref_links = ref_links
+        self.reversion_links = reversion_links
+        self.retain_ids = retain_ids
 
     @classmethod
     def fromstrstr(cls, s):
@@ -39,6 +42,22 @@ class DataflowRef:
             cell_tag = f'{self.cell_tag}$'
         else:
             cell_tag = ''
+
+        '''
+        Condition when retain_ids value is passed as true,
+        happens when a same variable exported for second time
+        '''
+        if self.retain_ids and self.name in self.reversion_links.keys():
+            return f'{self.name}${next(iter(self.reversion_links[self.name]))}'
+        
+        '''
+        Retain_ids is None when actual conversion happens and converted code is passed for execution
+        Retain_ids is True when a same variable is exported for second time.
+        Retain_ids is False when conversion drops dollar sign and this code is usually passed for cell in UI
+        '''
+        if (self.retain_ids is not None and (not self.ref_links.get(self.name) or (len(self.ref_links[self.name]) == 1 and list(self.ref_links[self.name])[0]) == self.cell_id)):
+            return f'{self.name}'
+        
         return f'{self.name}${qualifier}{cell_tag}{self.cell_id}'
 
     def __repr__(self):
@@ -94,7 +113,7 @@ def run_replacer(s, refs, replace_f):
             line[:ref.start_pos[1]] + replace_f(ref) + line[ref.end_pos[1]:]
     return '\n'.join(code_arr)    
 
-def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}):
+def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, all_refs={}):
     updates = []
 
     class DataflowLinker(ast.NodeVisitor):
@@ -113,6 +132,7 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
             elif (isinstance(node.ctx, ast.Load) and
                     all(node.id not in s for s in self.scope) and
                     dataflow_state.has_external_link(node.id, execution_count)):
+                #print(f"_____________Node.id={node.id}, uuid:{execution_count}_______________")
                 cell_id = dataflow_state.get_external_link(node.id, execution_count)
                 ref = DataflowRef(
                     start_pos=(node.lineno, node.col_offset),
@@ -121,6 +141,18 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
                     cell_id=cell_id
                 )
                 self.updates.append(ref)
+            elif (isinstance(node.ctx, ast.Load) and
+                    all(node.id not in s for s in self.scope) and
+                    all_refs.get(node.id) and len(all_refs[node.id]) == 1 ):
+                    cell_id = list(all_refs[node.id])[0]
+                    ref = DataflowRef(
+                        start_pos=(node.lineno, node.col_offset),
+                        end_pos=(node.end_lineno, node.end_col_offset),
+                        name=node.id,
+                        cell_id=cell_id
+                    )
+                    self.updates.append(ref)
+
                 # print("LOAD", name.id, cell_id, file=sys.__stdout__)
             self.generic_visit(node)
 
@@ -318,7 +350,7 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
 
     return run_replacer(s, updates, replace_f)
 
-def convert_identifier(s, replace_f=ref_replacer):
+def convert_identifier(s, replace_f=ref_replacer, ref_links={}, reversion_links={}, retain_ids=None):
     class DataflowReplacer(ast.NodeVisitor):
         def __init__(self):
             self.updates = []
@@ -331,8 +363,12 @@ def convert_identifier(s, replace_f=ref_replacer):
                 ref = DataflowRef(
                     start_pos=(node.lineno, node.col_offset),
                     end_pos=(node.end_lineno, node.end_col_offset),
-                    **json.loads(node.slice.value)
+                    **json.loads(node.slice.value),
+                    ref_links= ref_links,
+                    reversion_links=reversion_links,
+                    retain_ids=retain_ids
                 )
+            
                 self.updates.append(ref)
             self.generic_visit(node)
 
@@ -341,3 +377,37 @@ def convert_identifier(s, replace_f=ref_replacer):
     linker.visit(tree)
 
     return run_replacer(s, linker.updates, replace_f)
+
+def get_references(s):
+    class GetReferences(ast.NodeVisitor):
+        def visit_Subscript(self, node):
+            if (isinstance(node.value, ast.Name)
+                and node.value.id == '__dfvar__'):
+                node_value = json.loads(node.slice.value)
+                if not identifier_refs.get(node_value["cell_id"]):
+                    identifier_refs[node_value["cell_id"]] = set()
+                identifier_refs[node_value["cell_id"]].add(node_value["name"])
+                    
+            self.generic_visit(node)
+
+    identifier_refs=dict()
+    tree = ast.parse(s)
+    linker = GetReferences()
+    linker.visit(tree)
+
+    return identifier_refs
+
+def compare_code_cells(cell1, cell2):
+    def parse_to_ast(code):
+        return ast.parse(code)
+
+    try:
+        tree1 = parse_to_ast(cell1)
+        tree2 = parse_to_ast(cell2)
+
+        if ast.dump(tree1) == ast.dump(tree2):
+            return True
+        else:
+            return False
+    except SyntaxError:
+        return False

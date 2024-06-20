@@ -14,6 +14,9 @@ import inspect
 from traitlets import Type
 from ipykernel.jsonutil import json_clean
 
+from ipykernel.comm import Comm
+from IPython import get_ipython
+
 try:
     from IPython.core.interactiveshell import _asyncio_runner
 except ImportError:
@@ -27,6 +30,8 @@ from .utils import (
     ref_replacer,
     identifier_replacer,
     dollar_replacer,
+    get_references,
+    compare_code_cells
 )
 
 
@@ -50,6 +55,8 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         self.shell.display_pub.get_execution_count = lambda: int(
             self.execution_count, 16
         )
+        # self.dfcode = Comm(target_name='dfcode',data={})#get_ipython().kernel.comm_manager.register_target('dfcode', self.dfcode_comm)
+
         # # first use nest_ayncio for nested async, then add asyncio.Future to tornado
         # nest_asyncio.apply()
         # # from maartenbreddels: https://github.com/jupyter/nbclient/pull/71/files/a79ae70eeccf1ab8bdd28370cd28f9546bd4f657
@@ -79,6 +86,14 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
     #
     #     super()._publish_execute_input(code, parent, execution_count)
 
+    # def dfcode_comm(self, comm, msg, ui_code={}):
+    #     self.log.warn('___hit on dfcode_comm_____')
+    #     comm.send({'code_dict': ui_code})
+
+    #     @comm.on_msg
+    #     def _recv(msg):
+    #         pass
+
     async def execute_request(self, stream, ident, parent):
         """handle an execute_request"""
         try:
@@ -101,6 +116,17 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
 
         input_tags = dfkernel_data.get("input_tags", {})
         # print("SETTING INPUT TAGS:", input_tags, file=sys.__stdout__)
+
+        #output tags {output_tag: (exported_Cell_id)}
+        self.log.warn(f'OUTPUT TAGS: {dfkernel_data['output_tags']}')
+        output_tags_links = {}
+        for op_id, op_tags in dfkernel_data['output_tags'].items():
+            for tag in op_tags:
+                output_tags_links.setdefault(tag, set()).add(op_id)
+        
+        #self.log.warn(f'BEFORE OUTPUTTAGS_LINKS:  {output_tags_links}')
+
+        self._ref_links = output_tags_links
         self.shell.input_tags = input_tags
 
         self._outer_stream = stream
@@ -109,6 +135,8 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         self._outer_stop_on_error = stop_on_error
         self._outer_allow_stdin = allow_stdin
         self._outer_dfkernel_data = dfkernel_data
+        self._identifier_refs = {}
+        self._persistent_code = {}
 
         res = await self.inner_execute_request(
             code,
@@ -124,6 +152,40 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         # self._outer_stop_on_error = None
         # self._outer_allow_stdin = None
         # self._outer_dfkernel_data = None
+
+        if res.success:
+            # self.log.warn('__________xxxxxxxxxxxxxxxxxxxxxxxSTARTxxxxxxxxxxxxxxxxxxxxxxxxx___')
+            # self.log.warn(f'RFERECNCES OF CELL:{self._identifier_refs}\n\n')
+            # self.log.warn(f'output_tags_links:{output_tags_links}\ndfkernel_data:{dfkernel_data['all_refs']}\n')
+            cells_to_update, cells_to_execute, dfkernel_data = await self.update_identifiers(output_tags_links, dfkernel_data, input_tags=input_tags)
+            self.log.warn(f"*******\nUI CODE TO UPDATE : {cells_to_update}\n CELLS TO EXECUTE: {cells_to_execute}\n**********")
+            self._outer_dfkernel_data = dfkernel_data
+            code_to_update = dict()
+            for id in cells_to_update+cells_to_execute:
+                code_to_update[id] = dfkernel_data["code_dict"][id]
+            dfcode = Comm(target_name='dfcode',data={})
+            dfcode.open()
+            dfcode.send({'code_dict': code_to_update}) 
+            
+
+            # for cell_uuid in updated_cells:
+            #     res = await self.inner_execute_request(
+            #     dfkernel_data["code_dict"][cell_uuid],
+            #     cell_uuid,
+            #     silent,
+            #     store_history,
+            #     user_expressions)
+        
+        # self.log.warn('__________xxxxxxxxxxxxxxxxxxxxxxxENDxxxxxxxxxxxxxxxxxxxxxxxxx___')
+
+        # output_tags_links = {}
+        # for op_id, op_tags in dfkernel_data['output_tags'].items():
+        #     for tag in op_tags:
+        #         output_tags_links.setdefault(tag, set()).add(op_id)
+        # self.log.warn(f'AFTER OUTPUTTAGS_LINKS:  {output_tags_links}')
+        # print("LINKS:",self.shell.dataflow_state.links)
+        #tags exported second time
+        
 
     async def inner_execute_request(
         self, code, uuid, silent, store_history=True, user_expressions=None
@@ -150,15 +212,26 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
             execution_count = 1
         dollar_converted = False
         orig_code = code
+        parsed_code = ''
         try:
             code = convert_dollar(
                 code, self.shell.dataflow_state, uuid, identifier_replacer, input_tags
             )
+            # self.log.warn(f'code after Dollar Convert :\n{code}')
+            # self.log.warn('_________________________________________________')
             dollar_converted = True
             code = ground_refs(
-                code, self.shell.dataflow_state, uuid, identifier_replacer, input_tags
+                code, self.shell.dataflow_state, uuid, identifier_replacer, input_tags, all_refs=self._ref_links
             )
+            # self.log.warn(f'code after ground ref :\n{code}')
+            # self.log.warn('_________________________________________________')
+            parsed_code = code
+            self._identifier_refs[uuid] = get_references(code)
+            #self.log.warn(f"DISPLAYed Code:\n{code}\nCell references of {uuid}: {r}")
+            # code, self._identifier_refs = convert_identifier(code, dollar_replacer, uuid=uuid, identifier_refs = self._identifier_refs)
             code = convert_identifier(code, dollar_replacer)
+            # self.log.warn(f'code after convert identifier :\n{code}')
+            # self.log.warn('_________________________________________________')
             dollar_converted = False
         except SyntaxError as e:
             # ignore this for now, catch it in do_execute
@@ -170,10 +243,16 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
             # ignore this for now, catch it in do_execute
             pass
 
-        # print("FIRST CODE:", code)
-
+        #print("FIRST CODE:", code)
         if not silent:
-            self._publish_execute_input(code, parent, execution_count)
+            if len(parsed_code) > 0:
+                #r = get_references(parsed_code)
+                self.log.warn(f"___ref_links__ = {self._ref_links}")
+                display_code = convert_identifier(parsed_code, dollar_replacer, ref_links=self._ref_links, retain_ids=False)
+                # self.log.warn(f"DISPLAYED Code:\n{display_code}\nCell references of {uuid}: {r}")
+                self._publish_execute_input(display_code, parent, execution_count)
+            else:
+                self._publish_execute_input(code, parent, execution_count)
 
         # update the code_dict with the modified code
         dfkernel_data["code_dict"][uuid] = code
@@ -182,6 +261,7 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
             code = convert_dollar(
                 code, self.shell.dataflow_state, uuid, ref_replacer, input_tags
             )
+            self._persistent_code[uuid] = code
         except SyntaxError as e:
             # ignore this for now, catch it in do_execute
             pass
@@ -372,11 +452,16 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         if res.success:
             # print("SETTING DEPS", res.all_upstream_deps, res.all_downstream_deps,file=sys.__stdout__)
             reply_content["status"] = "ok"
+            #self._identifier_refs = identifier_refs
+            #self.log.warn(f'IDENTIFIER REFS:   {self._identifier_refs}')
 
             if hasattr(res, "nodes"):
                 reply_content["nodes"] = res.nodes
                 reply_content["links"] = res.links
                 reply_content["cells"] = res.cells
+                self.log.warn(f'___{uuid}__:____{self._identifier_refs.get(uuid, {})}______{code}__________________')
+                reply_content["identifier_refs"] = self._identifier_refs
+                reply_content["persistent_code"] = self._persistent_code
 
                 reply_content["upstream_deps"] = res.all_upstream_deps
                 reply_content["downstream_deps"] = res.all_downstream_deps
@@ -431,6 +516,118 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
 
         return reply_content, res
 
+    async def update_identifiers(self, output_tags_links, dfkernel_data, input_tags={}):
+        '''to_update_links: 
+            value = variable exported for second time 
+            key = uuid of the cell where the varibale is exported for first time
+        '''
+        #self._ref_links - output tag : {uuid1, uuid2, ...}
+
+        to_update_links = {} 
+        for op_tag, op_ids in output_tags_links.items():
+            if (op_tag in self.shell.dataflow_state.links and len(op_ids) == 1
+                and len(set(self.shell.dataflow_state.links[op_tag]) - op_ids) == 1):
+                to_update_links.setdefault(next(iter(op_ids)), set()).add(op_tag)
+                self._ref_links[op_tag].update(set(self.shell.dataflow_state.links[op_tag]) - op_ids)
+
+        #delete it
+        if len(to_update_links) > 0:
+            # self.log.warn("LINKS BEFORE EXECUTING THE CELL")
+            # self.log.warn(output_tags_links)
+            self.log.warn("VARIBALES EXPORTED SECOND TIME ARE:")
+            self.log.warn(to_update_links)
+            
+        #   self.log.warn('__________________________')
+            # self.log.warn("EXISTING VARIABLES ALL REFS BEFORE RUNNING THE CELL:")
+            # self.log.warn(dfkernel_data['all_refs'])
+            # self.log.warn('__________________________')
+
+        '''
+        Combine self._identifier_refs and dfkernel_data['all_refs']
+        Updated refs are available in self._identifier_refs
+        All refs are available in dfkernel_data['all_refs']
+        '''
+        for cell_id, cell_ref_tags in dfkernel_data['all_refs'].items():
+            if not self._identifier_refs.get(cell_id):
+                self._identifier_refs[cell_id] = cell_ref_tags
+
+        impacted_cells= set()
+        reversion_links = {} # In key:values,  length of values be one always ??
+        for op_id, op_tags in to_update_links.items():
+            for ref_id, ref_tags in self._identifier_refs.items():
+                if op_id in ref_tags and len(op_tags&set(ref_tags[op_id])) > 0:
+                    impacted_cells.add(ref_id)
+                    for tags_to_update in op_tags&set(ref_tags[op_id]):
+                        reversion_links.setdefault(tags_to_update, set()).add(op_id)
+
+        # self.log.warn(f'Updating the code in cells......{update_cells}......')
+        
+        '''
+        Add current UUID only when it uses same identifier for export and reference 
+        eg: g = g+10, here g is refered and g is exported
+        '''
+        if self._identifier_refs and len(self._identifier_refs.get(dfkernel_data.get("uuid"))) > 0:
+            curr_tags_exported = set(reversion_links.keys())
+            curr_tags_ref = set()
+            for cell_id, cell_ref_tags in self._identifier_refs[dfkernel_data.get("uuid")].items():
+                curr_tags_ref.update(cell_ref_tags)
+            if len(curr_tags_ref&curr_tags_exported) > 0:
+                impacted_cells.add(dfkernel_data.get("uuid"))
+
+        # '''
+        # recent executed status may change if the last cell is not executed again.
+        # '''
+        # if len(impacted_cells) > 0:
+        #     impacted_cells.add(dfkernel_data.get("uuid"))
+
+        ''''
+        Note: Reason for repeatation of code: on execution dependent cells may get updated with latest exported tag values
+        '''
+        display_code = dict()
+        parsed_code = dict()
+        cells_to_execute = list()
+        cells_to_update_code = list()
+        for cell_uuid in impacted_cells:
+            code = dfkernel_data["code_dict"][cell_uuid]
+            try:
+                #Display code is generated in below block
+                code = convert_dollar(code, self.shell.dataflow_state, cell_uuid, identifier_replacer, input_tags)
+                code = ground_refs(code, self.shell.dataflow_state, cell_uuid, identifier_replacer, input_tags, all_refs=self._ref_links)
+                code = convert_identifier(code, dollar_replacer, ref_links=self._ref_links, reversion_links=reversion_links, retain_ids=True)
+                display_code[cell_uuid] = code
+                dfkernel_data["code_dict"][cell_uuid] = code
+
+                #using display code persistent code is generated in below block
+                code = convert_dollar(code, self.shell.dataflow_state, cell_uuid, identifier_replacer, input_tags)
+                code = ground_refs(code, self.shell.dataflow_state, cell_uuid, identifier_replacer, input_tags, all_refs=self._ref_links)
+                code = convert_identifier(code, dollar_replacer)
+                code = convert_dollar(code, self.shell.dataflow_state, cell_uuid, ref_replacer, input_tags)
+                parsed_code[cell_uuid] = code
+            except SyntaxError as e:
+                pass
+            except TokenError as e:
+                pass
+
+            # self._publish_execute_input(code, parent, execution_count)
+            #self.log.warn(f" CODED UPDATED as part of reversion::::::::{code}")
+            
+
+            #dfkernel_data["code_dict"][cell_uuid] = code
+            self.log.warn('___________________________________________')
+            self.log.warn(f'Displayed code: {display_code[cell_uuid]}')
+            self.log.warn(f'Parsed code: {parsed_code[cell_uuid]}')
+            if dfkernel_data['persisted_code'].get(cell_uuid):
+                self.log.warn(f'Persisted code: {dfkernel_data['persisted_code'][cell_uuid]}')
+            self.log.warn('___________________________________________')
+            if dfkernel_data['persisted_code'].get(cell_uuid):
+                if compare_code_cells(parsed_code[cell_uuid], dfkernel_data['persisted_code'][cell_uuid]):
+                    cells_to_update_code.append(cell_uuid)
+                else:
+                    cells_to_execute.append(cell_uuid)
+            else:
+                cells_to_execute.append(cell_uuid)
+                
+        return cells_to_update_code, cells_to_execute, dfkernel_data 
 
 # This exists only for backwards compatibility - use IPythonKernel instead
 class Kernel(IPythonKernel):
