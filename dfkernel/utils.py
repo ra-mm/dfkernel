@@ -36,12 +36,8 @@ class DataflowRef:
 
     def __str__(self):
         qualifier = self.ref_qualifier if self.ref_qualifier is not None else ''
-        if self.cell_tag:
-            cell_tag = f'{self.cell_tag}$'
-        else:
-            cell_tag = ''
-
-        if self.cell_id == '@NoRef':
+        
+        if self.cell_id == '@default_ref':
             return f'{self.name}'
         
         reversed_input_tags = {id: tag for tag, id in self.input_tags.items()}
@@ -206,7 +202,7 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
                     if (output_tags.get(ref_data['name']) and len(output_tags[ref_data['name']]) == 1 and
                         ref_data['cell_id'] in output_tags[ref_data['name']]
                         and len(cell_refs[ref_data['name']]) == 1):  # last line added to resolve ambiguity when multiple refs exists
-                        ref_data['cell_id']='@NoRef'
+                        ref_data['cell_id']='@default_ref'
                         ref_data['cell_tag'] = None
                         ref = DataflowRef(
                             start_pos=(node.lineno, node.col_offset),

@@ -54,7 +54,7 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         self.shell.display_pub.get_execution_count = lambda: int(
             self.execution_count, 16
         )
-        get_ipython().kernel.comm_manager.register_target('dfcode', self.dfcode_comm_recv)
+        get_ipython().kernel.comm_manager.register_target('dfcode', self.dfcode_comm)
         
         # # first use nest_ayncio for nested async, then add asyncio.Future to tornado
         # nest_asyncio.apply()
@@ -86,12 +86,12 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
     #     super()._publish_execute_input(code, parent, execution_count)
 
     
-    def dfcode_comm_recv(self, comm, msg):
+    def dfcode_comm(self, comm, msg):
         @comm.on_msg
         def _recv(msg):
             try:
                 dfMetadata = msg['content']['data']['dfMetadata']
-                code_dict = self.update_cells(dfMetadata)
+                code_dict = self.update_code_cells(dfMetadata)
                 comm.send({'code_dict': code_dict})
 
             except Exception as e:
@@ -148,7 +148,6 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
             store_history,
             user_expressions,
         )
-
 
     async def inner_execute_request(
         self, code, uuid, silent, store_history=True, user_expressions=None
@@ -466,7 +465,7 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
 
         return reply_content, res
 
-    def update_cells(self, dfmetadata):
+    def update_code_cells(self, dfmetadata):
         curr_output_tags = dict()
 
         for id, tags in dfmetadata['output_tags'].items():
@@ -477,7 +476,6 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         updated_code_dict = {}
         for uuid, refs in dfmetadata['all_refs'].items():
             code_refs = dict()
-            update_cell = True
             for ref_id, ref_tags in refs['ref'].items():
                 for tag in ref_tags:
                     if code_refs.get(tag):
@@ -485,12 +483,11 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
                     else:
                         code_refs[tag] = {ref_id}
 
-            if update_cell and dfmetadata['code_dict'].get(uuid):
+            if dfmetadata['code_dict'].get(uuid):
                 try:
-                    self.log.warn(f'Updating the modifing cell {uuid}')
                     code = dfmetadata['code_dict'][uuid]
+                    tag_refs = { value: key for key, value in refs['tag_refs'].items() }
 
-                    tag_refs = {value: key for key, value in refs['tag_refs'].items()}
                     code = convert_dollar(
                     code, self.shell.dataflow_state, uuid, identifier_replacer, dfmetadata.get("input_tags", {}), reversion=True, tag_refs = tag_refs
                     )
@@ -500,6 +497,7 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
                     )
 
                     code = convert_identifier(code, dollar_replacer, input_tags=dfmetadata.get("input_tags", {}))
+                    
                     if dfmetadata['code_dict'].get(uuid) and code != dfmetadata['code_dict'][uuid]:
                         updated_code_dict[uuid] = code
 
