@@ -57,6 +57,8 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         self.shell.display_pub.get_execution_count = lambda: int(
             self.execution_count, 16
         )
+        self.log.info("**dfkerenl***")
+        print("***********dfkernel")
         get_ipython().kernel.comm_manager.register_target('dfcode', self.dfcode_comm)
         
         # # first use nest_ayncio for nested async, then add asyncio.Future to tornado
