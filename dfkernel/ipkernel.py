@@ -16,6 +16,9 @@ from ipykernel.jsonutil import json_clean
 
 from ipykernel.comm import Comm
 from IPython import get_ipython
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
 
 try:
     from IPython.core.interactiveshell import _asyncio_runner
@@ -90,7 +93,7 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         @comm.on_msg
         def _recv(msg):
             try:
-                print("**COMM recieved request***")
+                self.log.info("**COMM request Recev***")
                 update_persistent_code = False
                 dfMetadata = msg['content']['data']['dfMetadata']
                 self.shell.input_tags = dfMetadata['input_tags']
@@ -99,15 +102,15 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
                     update_persistent_code = True
 
                 code_dict, updated_persistent_code_dict = self.update_code_cells(dfMetadata, update_persistent_code)
-                print("**COMM sending request***")
+                self.log.info("**COMM sending repsonse***")
                 comm.send({'code_dict': code_dict, 'persistent_code_dict': updated_persistent_code_dict})
-                print("**COMM  request send***")
+                self.log.info("**COMM  request send***")
             except Exception as e:
                 self.log.error('Error in conversion')
                 self.log.error(e)
                 comm.send({'error': str(e)})
             finally:
-                comm.close()
+                comm.close()      
 
     async def execute_request(self, stream, ident, parent):
         """handle an execute_request"""
