@@ -236,6 +236,7 @@ function navigateToCellByVariable(variable: string, variableScope: string|null, 
                 || (id === refId || tag === refId)){
                 notebook.activeCellIndex = index;
                 notebook.scrollToCell(notebook.widgets[index]);
+                notebook.widgets[index].editor?.focus();
                 break;
               }
             }
@@ -302,6 +303,7 @@ function navigateToCellByVariable(variable: string, variableScope: string|null, 
     state.highlightedRefId = cellid;
     computeDecorations(notebookTracker);
     notebook.activeCellIndex = currentCellIndex;
+    notebook.widgets[currentCellIndex].editor?.focus();
   }
 }
 
