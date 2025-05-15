@@ -488,6 +488,12 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         updated_code_dict = {}
         updated_executed_code_dict = {}
 
+        # updated code to handle replace cell tag
+        replacing_tag_name, replaced_tag_cell_id = None, None
+        if dfmetadata.get('replacing_tag_name') and dfmetadata.get('replaced_tag_cell_id'):
+            replacing_tag_name = dfmetadata['replacing_tag_name']
+            replaced_tag_cell_id = dfmetadata['replaced_tag_cell_id']
+
         for id, tags in dfmetadata['output_tags'].items():
             for tag in tags:
                 curr_output_tags[tag].add(id)
@@ -495,8 +501,9 @@ class IPythonKernel(ipykernel.ipkernel.IPythonKernel):
         def convert_code(code, uuid, refs):
             try:
                 tag_refs = { value: key for key, value in refs['tag_refs'].items() }
+                # updated parameters to handle replace cell tag
                 code = convert_dollar(
-                    code, self.shell.dataflow_state, uuid, identifier_replacer, dfmetadata.get("input_tags", {}), reversion=True, tag_refs=tag_refs
+                    code, self.shell.dataflow_state, uuid, identifier_replacer, dfmetadata.get("input_tags", {}), reversion=True, tag_refs=tag_refs, code_cell_refs=dict(code_refs), replacing_tag_name=replacing_tag_name, replaced_tag_cell_id=replaced_tag_cell_id
                 )
 
                 code = ground_refs(
